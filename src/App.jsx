@@ -3,17 +3,8 @@ import { useState, useEffect } from "react";
 // ─── SUPABASE CONFIG ──────────────────────────────────────────────────────────
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const USE_SUPABASE = !!SUPABASE_URL && !!SUPABASE_ANON_KEY;
 
-// ─── LOCAL STORAGE FALLBACK ───────────────────────────────────────────────────
-const LS = {
-  get: (k) => { try { return JSON.parse(localStorage.getItem(k)) ?? []; } catch { return []; } },
-  set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
-  getVal: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
-  setVal: (k, v) => localStorage.setItem(k, v),
-};
-
-// ─── SUPABASE MINI-CLIENT ─────────────────────────────────────────────────────
+// ─── SUPABASE CLIENT ──────────────────────────────────────────────────────────
 async function sbFetch(path, opts = {}) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     headers: {
@@ -29,98 +20,85 @@ async function sbFetch(path, opts = {}) {
   return text ? JSON.parse(text) : [];
 }
 
+// ─── PASSWORD HASHING ─────────────────────────────────────────────────────────
+async function hashPassword(password) {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(password)
+  );
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
 // ─── DATA LAYER ───────────────────────────────────────────────────────────────
 const DB = {
-  // Org password
   async getOrgPassword() {
-    if (!USE_SUPABASE) return LS.getVal("tt_org_password");
     const rows = await sbFetch("settings?key=eq.org_password&select=value");
     return rows[0]?.value ?? null;
   },
-  async setOrgPassword(password) {
-    if (!USE_SUPABASE) { LS.setVal("tt_org_password", password); return; }
+  async setOrgPassword(hash) {
     await sbFetch("settings", {
       method: "POST",
       prefer: "resolution=merge-duplicates,return=representation",
-      body: JSON.stringify({ key: "org_password", value: password }),
+      body: JSON.stringify({ key: "org_password", value: hash }),
     });
   },
 
-  // Users — filter out soft-deleted
+  // Users
   async getUsers() {
-    if (!USE_SUPABASE) return LS.get("tt_users").filter(u => !u.deleted_at);
     return sbFetch("users?select=*&deleted_at=is.null&order=name.asc");
   },
   async createUser(name) {
-    const user = { id: crypto.randomUUID(), name, created_at: new Date().toISOString(), deleted_at: null };
-    if (!USE_SUPABASE) { const u = LS.get("tt_users"); u.push(user); LS.set("tt_users", u); return user; }
     const res = await sbFetch("users", { method: "POST", body: JSON.stringify({ name }) });
     return res[0];
   },
 
-  // Projects — filter out soft-deleted
+  // Projects
   async getProjects() {
-    if (!USE_SUPABASE) return LS.get("tt_projects").filter(p => !p.deleted_at);
     return sbFetch("projects?select=*,project_members(user_id)&deleted_at=is.null&order=name.asc");
   },
   async createProject(name, color, collaboratorIds) {
-    if (!USE_SUPABASE) {
-      const p = { id: crypto.randomUUID(), name, color, collaborator_ids: collaboratorIds, archived: false, deleted_at: null, created_at: new Date().toISOString() };
-      const ps = LS.get("tt_projects"); ps.push(p); LS.set("tt_projects", ps); return p;
-    }
-    const [proj] = await sbFetch("projects", { method: "POST", body: JSON.stringify({ name, color, archived: false }) });
+    const [proj] = await sbFetch("projects", {
+      method: "POST",
+      body: JSON.stringify({ name, color, archived: false }),
+    });
     if (collaboratorIds.length) {
-      await sbFetch("project_members", { method: "POST", body: JSON.stringify(collaboratorIds.map(uid => ({ project_id: proj.id, user_id: uid }))) });
+      await sbFetch("project_members", {
+        method: "POST",
+        body: JSON.stringify(collaboratorIds.map(uid => ({ project_id: proj.id, user_id: uid }))),
+      });
     }
     proj.collaborator_ids = collaboratorIds;
     return proj;
   },
   async archiveProject(id) {
-    if (!USE_SUPABASE) {
-      const ps = LS.get("tt_projects").map(p => p.id === id ? { ...p, archived: true } : p);
-      LS.set("tt_projects", ps); return;
-    }
     await sbFetch(`projects?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ archived: true }) });
   },
   async unarchiveProject(id) {
-    if (!USE_SUPABASE) {
-      const ps = LS.get("tt_projects").map(p => p.id === id ? { ...p, archived: false } : p);
-      LS.set("tt_projects", ps); return;
-    }
     await sbFetch(`projects?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ archived: false }) });
   },
   async updateCollaborators(projectId, collaboratorIds) {
-    if (!USE_SUPABASE) {
-      const ps = LS.get("tt_projects").map(p => p.id === projectId ? { ...p, collaborator_ids: collaboratorIds } : p);
-      LS.set("tt_projects", ps); return;
-    }
     await sbFetch(`project_members?project_id=eq.${projectId}`, { method: "DELETE", prefer: "return=minimal" });
     if (collaboratorIds.length) {
-      await sbFetch("project_members", { method: "POST", body: JSON.stringify(collaboratorIds.map(uid => ({ project_id: projectId, user_id: uid }))) });
+      await sbFetch("project_members", {
+        method: "POST",
+        body: JSON.stringify(collaboratorIds.map(uid => ({ project_id: projectId, user_id: uid }))),
+      });
     }
   },
 
-  // Time Entries — soft delete only, filter out deleted
+  // Time Entries
   async getEntries() {
-    if (!USE_SUPABASE) return LS.get("tt_entries").filter(e => !e.deleted_at);
     return sbFetch("time_entries?select=*&deleted_at=is.null&order=date.desc,created_at.desc");
   },
   async logEntry(entry) {
-    const e = { ...entry, id: crypto.randomUUID(), created_at: new Date().toISOString(), deleted_at: null };
-    if (!USE_SUPABASE) { const es = LS.get("tt_entries"); es.push(e); LS.set("tt_entries", es); return e; }
     const res = await sbFetch("time_entries", { method: "POST", body: JSON.stringify(entry) });
     return res[0];
   },
   async softDeleteEntry(id) {
-    const now = new Date().toISOString();
-    if (!USE_SUPABASE) {
-      LS.set("tt_entries", LS.get("tt_entries").map(e => e.id === id ? { ...e, deleted_at: now } : e));
-      return;
-    }
     await sbFetch(`time_entries?id=eq.${id}`, {
       method: "PATCH",
       prefer: "return=minimal",
-      body: JSON.stringify({ deleted_at: now }),
+      body: JSON.stringify({ deleted_at: new Date().toISOString() }),
     });
   },
 };
@@ -368,29 +346,37 @@ const styles = `
 
 // ─── AUTH SCREEN ──────────────────────────────────────────────────────────────
 function AuthScreen({ onAuth }) {
-  const [mode, setMode] = useState("checking");
+  const [mode, setMode] = useState("checking"); // checking | login | setup
   const [input, setInput] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    DB.getOrgPassword().then(pw => setMode(pw ? "login" : "setup"));
+    DB.getOrgPassword().then(hash => setMode(hash ? "login" : "setup"));
   }, []);
 
   const handleLogin = async () => {
+    if (!input) { setError("Enter the password."); return; }
     setLoading(true); setError("");
+    const hash = await hashPassword(input);
     const stored = await DB.getOrgPassword();
-    if (input === stored) { onAuth(); }
-    else { setError("Wrong password. Try again."); }
+    if (hash === stored) {
+      localStorage.setItem("tt_authed", "1");
+      onAuth();
+    } else {
+      setError("Wrong password.");
+    }
     setLoading(false);
   };
 
   const handleSetup = async () => {
-    if (!input.trim()) { setError("Password cannot be empty."); return; }
+    if (!input) { setError("Password cannot be empty."); return; }
     if (input !== confirm) { setError("Passwords don't match."); return; }
     setLoading(true);
-    await DB.setOrgPassword(input);
+    const hash = await hashPassword(input);
+    await DB.setOrgPassword(hash);
+    localStorage.setItem("tt_authed", "1");
     onAuth();
     setLoading(false);
   };
@@ -399,7 +385,7 @@ function AuthScreen({ onAuth }) {
     <>
       <style>{styles}</style>
       <div className="centered-screen">
-        <div className="screen-title">time<span>.</span>track</div>
+        <div className="screen-title">time<span style={{ color: "var(--amber)" }}>.</span>track</div>
       </div>
     </>
   );
@@ -415,31 +401,26 @@ function AuthScreen({ onAuth }) {
           </div>
         </div>
         <div className="auth-box">
-          <div className="auth-box-title">
-            {mode === "setup" ? "Create organisation password" : "Organisation password"}
-          </div>
           {mode === "setup" && (
             <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
-              One shared password for your whole team. Share it with your coworkers — anyone with it can access the app.
+              Set a shared password for your team. Share it with anyone who needs access.
             </div>
           )}
           <div className="field">
             <label>{mode === "setup" ? "New password" : "Password"}</label>
             <input
-              type="password" value={input} autoFocus
+              autoFocus type="password" placeholder="••••••••" value={input}
               onChange={e => { setInput(e.target.value); setError(""); }}
               onKeyDown={e => e.key === "Enter" && (mode === "login" ? handleLogin() : null)}
-              placeholder="••••••••"
             />
           </div>
           {mode === "setup" && (
             <div className="field">
               <label>Confirm password</label>
               <input
-                type="password" value={confirm}
+                type="password" placeholder="••••••••" value={confirm}
                 onChange={e => { setConfirm(e.target.value); setError(""); }}
                 onKeyDown={e => e.key === "Enter" && handleSetup()}
-                placeholder="••••••••"
               />
             </div>
           )}
@@ -454,52 +435,6 @@ function AuthScreen({ onAuth }) {
         </div>
       </div>
     </>
-  );
-}
-
-// ─── USER SELECT SCREEN ───────────────────────────────────────────────────────
-function UserSelectScreen({ users, onSelect, onCreate, onLogout }) {
-  const [newName, setNewName] = useState("");
-  const [creating, setCreating] = useState(false);
-
-  const handleCreate = async () => {
-    if (!newName.trim()) return;
-    const u = await onCreate(newName.trim());
-    onSelect(u);
-  };
-
-  return (
-    <div className="centered-screen">
-      <div style={{ textAlign: "center" }}>
-        <div className="screen-title">time<span>.</span>track</div>
-        <div className="screen-subtitle" style={{ marginTop: 8 }}>Who's working today?</div>
-      </div>
-      <div className="user-grid">
-        {users.map(u => (
-          <button key={u.id} className="user-select-btn" onClick={() => onSelect(u)}>
-            <div className="avatar-lg">{u.name[0].toUpperCase()}</div>
-            {u.name}
-          </button>
-        ))}
-      </div>
-      {!creating ? (
-        <button className="btn btn-ghost" onClick={() => setCreating(true)}>+ New user</button>
-      ) : (
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "var(--radius)", padding: "9px 12px", fontFamily: "var(--font-display)", fontSize: 14, outline: "none" }}
-            placeholder="Your name" value={newName} autoFocus
-            onChange={e => setNewName(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && handleCreate()}
-          />
-          <button className="btn btn-primary" onClick={handleCreate}>Create</button>
-          <button className="btn btn-ghost" onClick={() => setCreating(false)}>Cancel</button>
-        </div>
-      )}
-      <button className="btn btn-ghost btn-sm" style={{ color: "var(--text-muted)", fontSize: 12 }} onClick={onLogout}>
-        ← Sign out of organisation
-      </button>
-    </div>
   );
 }
 
@@ -931,9 +866,55 @@ function Toast({ msg }) {
   return msg ? <div className="toast">{msg}</div> : null;
 }
 
+// ─── USER SELECT SCREEN ───────────────────────────────────────────────────────
+function UserSelectScreen({ users, onSelect, onCreate, onLogout }) {
+  const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  const handleCreate = async () => {
+    if (!newName.trim()) return;
+    const u = await onCreate(newName.trim());
+    onSelect(u);
+  };
+
+  return (
+    <div className="centered-screen">
+      <div style={{ textAlign: "center" }}>
+        <div className="screen-title">time<span>.</span>track</div>
+        <div className="screen-subtitle" style={{ marginTop: 8 }}>Who's working today?</div>
+      </div>
+      <div className="user-grid">
+        {users.map(u => (
+          <button key={u.id} className="user-select-btn" onClick={() => onSelect(u)}>
+            <div className="avatar-lg">{u.name[0].toUpperCase()}</div>
+            {u.name}
+          </button>
+        ))}
+      </div>
+      {!creating ? (
+        <button className="btn btn-ghost" onClick={() => setCreating(true)}>+ New user</button>
+      ) : (
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "var(--radius)", padding: "9px 12px", fontFamily: "var(--font-display)", fontSize: 14, outline: "none" }}
+            placeholder="Your name" value={newName} autoFocus
+            onChange={e => setNewName(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleCreate()}
+          />
+          <button className="btn btn-primary" onClick={handleCreate}>Create</button>
+          <button className="btn btn-ghost" onClick={() => setCreating(false)}>Cancel</button>
+        </div>
+      )}
+      <button className="btn btn-ghost btn-sm" style={{ color: "var(--text-muted)", fontSize: 12 }} onClick={onLogout}>
+        ← Sign out
+      </button>
+    </div>
+  );
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [authed, setAuthed] = useState(false);
+  const [authed, setAuthed] = useState(() => localStorage.getItem("tt_authed") === "1");
   const [currentUser, setCurrentUser] = useState(null);
   const [users, setUsers] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -945,7 +926,7 @@ export default function App() {
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2500); };
 
   useEffect(() => {
-    if (!authed) return;
+    if (!authed) { setLoading(false); return; }
     let cancelled = false;
     (async () => {
       setLoading(true);
@@ -955,7 +936,18 @@ export default function App() {
     return () => { cancelled = true; };
   }, [authed]);
 
-  const handleCreateUser = async (name) => { const u = await DB.createUser(name); setUsers(us => [...us, u]); return u; };
+  const handleSignOut = () => {
+    localStorage.removeItem("tt_authed");
+    setAuthed(false);
+    setCurrentUser(null);
+    setUsers([]); setProjects([]); setEntries([]);
+  };
+
+  const handleCreateUser = async (name) => {
+    const u = await DB.createUser(name);
+    setUsers(us => [...us, u]);
+    return u;
+  };
   const handleCreateProject = async (name, color, collaborators) => {
     const p = await DB.createProject(name, color, collaborators);
     setProjects(ps => [...ps, p]);
@@ -989,13 +981,19 @@ export default function App() {
 
   if (!authed) return <><style>{styles}</style><AuthScreen onAuth={() => setAuthed(true)} /></>;
 
+  if (loading) return (
+    <>
+      <style>{styles}</style>
+      <div className="centered-screen">
+        <div className="screen-title">time<span style={{ color: "var(--amber)" }}>.</span>track</div>
+      </div>
+    </>
+  );
+
   if (!currentUser) return (
     <>
       <style>{styles}</style>
-      {loading
-        ? <div className="centered-screen"><div className="screen-title">time<span style={{ color: "var(--amber)" }}>.</span>track</div></div>
-        : <UserSelectScreen users={users} onSelect={setCurrentUser} onCreate={handleCreateUser} onLogout={() => setAuthed(false)} />
-      }
+      <UserSelectScreen users={users} onSelect={setCurrentUser} onCreate={handleCreateUser} onLogout={handleSignOut} />
     </>
   );
 

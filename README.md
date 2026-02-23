@@ -67,7 +67,7 @@ create policy "public read/write project_members" on project_members for all usi
 create policy "public read/write time_entries" on time_entries for all using (true) with check (true);
 create policy "public read/write settings" on settings for all using (true) with check (true);
 ```
- 
+
 Then grab your **Project URL** and **anon key** from Settings → API.
 
 ### 2. Environment variables
@@ -104,7 +104,16 @@ Add your Supabase credentials as repository secrets (Settings → Secrets → Ac
 - `VITE_SUPABASE_URL`
 - `VITE_SUPABASE_ANON_KEY`
 
-The included GitHub Actions workflow handles the rest on every push to `main`. Once deployed, go to Settings → Pages and make sure the source is set to the `gh-pages` branch.
+The included GitHub Actions workflow handles the build and deploy on every push to `main`. After the first workflow run completes:
+
+1. Go to your repo → **Settings → Pages**
+2. Under **Source**, change the branch to `gh-pages` → `/ (root)` → Save
+
+Your site will be live at `https://YOUR_USERNAME.github.io/your-repo-name/` within a minute.
+
+> If `gh-pages` doesn't appear in the dropdown, the Actions workflow hasn't finished yet — check the **Actions** tab first.
+
+> If the workflow fails with a 403 error, go to **Settings → Actions → General → Workflow permissions** and set it to **Read and write permissions**.
 
 ---
 

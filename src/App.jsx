@@ -225,6 +225,8 @@ const styles = `
   }
   .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--amber); }
   .field select option { background: var(--surface2); }
+  .field.error input, .field.error select { border-color: var(--danger); }
+  .field-error { font-size: 11px; color: var(--danger); font-weight: 600; margin-top: 2px; }
 
   .btn {
     padding: 9px 20px; border-radius: var(--radius); border: none; cursor: pointer;
@@ -268,7 +270,11 @@ const styles = `
     background: var(--surface2); border: 1px solid var(--border);
     border-radius: var(--radius); padding: 16px;
     display: flex; flex-direction: column; gap: 8px;
+    cursor: pointer; transition: border-color 0.15s, background 0.15s;
   }
+  .project-card:hover { border-color: var(--amber); background: #1a2030; }
+  .project-card.static { cursor: default; }
+  .project-card.static:hover { border-color: var(--border); background: var(--surface2); }
   .project-header { display: flex; align-items: center; gap: 10px; }
   .project-name { font-weight: 700; font-size: 15px; }
   .project-meta { font-size: 11px; color: var(--text-muted); }
@@ -480,76 +486,159 @@ function UserSelectScreen({ users, onSelect, onCreate, onLogout }) {
   );
 }
 
-// ─── LOG ENTRY FORM ───────────────────────────────────────────────────────────
-function LogEntryForm({ users, projects, currentUser, onSave }) {
+// ─── LOG PAGE (project-first) ─────────────────────────────────────────────────
+function LogPage({ users, projects, entries, currentUser, onSave, onDelete, onExport }) {
+  const [selectedProject, setSelectedProject] = useState(null);
   const today = new Date().toISOString().slice(0, 10);
-  const [form, setForm] = useState({ user_id: currentUser.id, project_id: "", date: today, hours: "", notes: "" });
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const [form, setForm] = useState({ date: today, hours: "", notes: "" });
+  const [errors, setErrors] = useState({});
+  const [saving, setSaving] = useState(false);
+  const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setErrors(e => ({ ...e, [k]: null })); };
+
   const activeProjects = projects.filter(p => !p.archived && !p.deleted_at);
 
-  const handleSave = async () => {
-    if (!form.project_id || !form.hours || !form.date) return;
-    await onSave({ ...form, hours: parseFloat(form.hours) });
-    setForm(f => ({ ...f, project_id: "", hours: "", notes: "" }));
+  const validate = () => {
+    const e = {};
+    if (!form.date) e.date = "Required";
+    if (!form.hours || parseFloat(form.hours) <= 0) e.hours = "Enter a valid number";
+    return e;
   };
 
+  const handleSave = async () => {
+    const e = validate();
+    if (Object.keys(e).length) { setErrors(e); return; }
+    setSaving(true);
+    await onSave({ user_id: currentUser.id, project_id: selectedProject.id, date: form.date, hours: parseFloat(form.hours), notes: form.notes });
+    setForm({ date: today, hours: "", notes: "" });
+    setErrors({});
+    setSaving(false);
+  };
+
+  const projectEntries = selectedProject
+    ? entries.filter(e => e.project_id === selectedProject.id)
+    : [];
+
+  const [entryFilter, setEntryFilter] = useState("all");
+  const visibleEntries = entryFilter === "all" ? projectEntries : projectEntries.filter(e => e.user_id === entryFilter);
+
+  // Back to project list
+  if (!selectedProject) return (
+    <div>
+      <div className="page-title">Log Time</div>
+      {activeProjects.length === 0
+        ? <div className="empty">No active projects. Create one in the Projects tab first.</div>
+        : (
+          <div className="grid-3">
+            {activeProjects.map(p => {
+              const myHoursThisWeek = (() => {
+                const { start, end } = getWeekRange(0);
+                return entries
+                  .filter(e => e.project_id === p.id && e.user_id === currentUser.id && new Date(e.date) >= start && new Date(e.date) <= end)
+                  .reduce((s, e) => s + e.hours, 0);
+              })();
+              return (
+                <div key={p.id} className="project-card" onClick={() => setSelectedProject(p)}>
+                  <div className="project-header">
+                    <div className="color-swatch" style={{ background: p.color }} />
+                    <div className="project-name">{p.name}</div>
+                  </div>
+                  {myHoursThisWeek > 0 && (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      You: <span style={{ color: "var(--amber)", fontFamily: "var(--font-mono)" }}>{fmtHours(myHoursThisWeek)}</span> this week
+                    </div>
+                  )}
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>Click to log time →</div>
+                </div>
+              );
+            })}
+          </div>
+        )
+      }
+    </div>
+  );
+
+  // Inside a project
   return (
-    <div className="card">
-      <div className="card-title">Log Time</div>
-      <div className="form-row">
-        <div className="field">
-          <label>User</label>
-          <select value={form.user_id} onChange={e => set("user_id", e.target.value)}>
-            {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-          </select>
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
+        <button className="btn btn-ghost btn-sm" onClick={() => setSelectedProject(null)}>← Back</button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div className="color-swatch" style={{ background: selectedProject.color, width: 14, height: 14 }} />
+          <div className="page-title" style={{ margin: 0 }}>{selectedProject.name}</div>
         </div>
-        <div className="field">
-          <label>Project</label>
-          <select value={form.project_id} onChange={e => set("project_id", e.target.value)}>
-            <option value="">Select project…</option>
-            {activeProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-title">Log hours as {currentUser.name}</div>
+        <div className="form-row">
+          <div className={`field ${errors.date ? "error" : ""}`} style={{ maxWidth: 160 }}>
+            <label>Date</label>
+            <input type="date" value={form.date} onChange={e => set("date", e.target.value)} />
+            {errors.date && <div className="field-error">{errors.date}</div>}
+          </div>
+          <div className={`field ${errors.hours ? "error" : ""}`} style={{ maxWidth: 110 }}>
+            <label>Hours</label>
+            <input type="number" step="0.25" min="0.25" max="24" placeholder="0.0" value={form.hours} onChange={e => set("hours", e.target.value)} onKeyDown={e => e.key === "Enter" && handleSave()} />
+            {errors.hours && <div className="field-error">{errors.hours}</div>}
+          </div>
+          <div className="field">
+            <label>Notes (optional)</label>
+            <input type="text" placeholder="What did you work on?" value={form.notes} onChange={e => set("notes", e.target.value)} onKeyDown={e => e.key === "Enter" && handleSave()} />
+          </div>
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving}>{saving ? "…" : "Log"}</button>
         </div>
-        <div className="field" style={{ maxWidth: 140 }}>
-          <label>Date</label>
-          <input type="date" value={form.date} onChange={e => set("date", e.target.value)} />
+      </div>
+
+      <div className="card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div className="card-title" style={{ marginBottom: 0 }}>Entries</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <select
+              style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "var(--radius)", padding: "5px 10px", fontFamily: "var(--font-display)", fontSize: 12, outline: "none", minWidth: 120 }}
+              value={entryFilter} onChange={e => setEntryFilter(e.target.value)}
+            >
+              <option value="all">All team</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+            <button className="btn btn-ghost btn-sm" onClick={() => onExport(visibleEntries)}>↓ CSV</button>
+          </div>
         </div>
-        <div className="field" style={{ maxWidth: 100 }}>
-          <label>Hours</label>
-          <input type="number" step="0.25" min="0.25" max="24" placeholder="0.0" value={form.hours} onChange={e => set("hours", e.target.value)} />
-        </div>
-        <div className="field">
-          <label>Notes (optional)</label>
-          <input type="text" placeholder="What did you work on?" value={form.notes} onChange={e => set("notes", e.target.value)} onKeyDown={e => e.key === "Enter" && handleSave()} />
-        </div>
-        <button className="btn btn-primary" onClick={handleSave}>Log</button>
+        <EntriesTable entries={visibleEntries.slice(0, 50)} users={users} projects={projects} onDelete={onDelete} currentUser={currentUser} hideProject />
       </div>
     </div>
   );
 }
 
 // ─── ENTRIES TABLE ────────────────────────────────────────────────────────────
-function EntriesTable({ entries, users, projects, onDelete, currentUser }) {
+function EntriesTable({ entries, users, projects, onDelete, currentUser, hideProject }) {
   const getName = (id, arr) => arr.find(x => x.id === id)?.name ?? "—";
   const getColor = (id) => projects.find(p => p.id === id)?.color ?? "#888";
 
-  if (!entries.length) return <div className="empty">No entries yet. Log your first hours above!</div>;
+  if (!entries.length) return <div className="empty">No entries yet.</div>;
+
+  const cols = hideProject
+    ? "100px 1fr 70px 1fr 36px"
+    : "100px 1fr 1fr 70px 1fr 36px";
 
   return (
     <div className="entry-list">
-      <div className="entry-row header-row">
-        <span>Date</span><span>User</span><span>Project</span><span>Hours</span><span>Notes</span><span></span>
+      <div className="entry-row header-row" style={{ gridTemplateColumns: cols }}>
+        <span>Date</span><span>User</span>
+        {!hideProject && <span>Project</span>}
+        <span>Hours</span><span>Notes</span><span></span>
       </div>
       {entries.map(e => {
         const isOwn = e.user_id === currentUser.id;
         return (
-          <div key={e.id} className="entry-row">
+          <div key={e.id} className="entry-row" style={{ gridTemplateColumns: cols }}>
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>{e.date}</span>
             <span style={{ fontWeight: isOwn ? 700 : 400 }}>{getName(e.user_id, users)}</span>
-            <span>
-              <span className="project-dot" style={{ background: getColor(e.project_id) }} />
-              {getName(e.project_id, projects)}
-            </span>
+            {!hideProject && (
+              <span>
+                <span className="project-dot" style={{ background: getColor(e.project_id) }} />
+                {getName(e.project_id, projects)}
+              </span>
+            )}
             <span className="hours-badge">{fmtHours(e.hours)}</span>
             <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{e.notes || "—"}</span>
             {isOwn
@@ -779,7 +868,6 @@ export default function App() {
   const [page, setPage] = useState("log");
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState("");
-  const [entryFilter, setEntryFilter] = useState("all");
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2500); };
 
@@ -828,8 +916,6 @@ export default function App() {
     </>
   );
 
-  const filteredEntries = entryFilter === "all" ? entries : entries.filter(e => e.user_id === entryFilter);
-
   return (
     <>
       <style>{styles}</style>
@@ -851,26 +937,15 @@ export default function App() {
 
         <main className="main">
           {page === "log" && (
-            <>
-              <div className="page-title">Log Time</div>
-              <LogEntryForm users={users} projects={projects} currentUser={currentUser} onSave={handleLogEntry} />
-              <div className="card" style={{ marginTop: 16 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-                  <div className="card-title" style={{ marginBottom: 0 }}>Recent Entries</div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <select
-                      style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "var(--radius)", padding: "5px 10px", fontFamily: "var(--font-display)", fontSize: 12, outline: "none", minWidth: 120 }}
-                      value={entryFilter} onChange={e => setEntryFilter(e.target.value)}
-                    >
-                      <option value="all">All users</option>
-                      {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-                    </select>
-                    <button className="btn btn-ghost btn-sm" onClick={() => exportCSV(filteredEntries, users, projects)}>↓ Export CSV</button>
-                  </div>
-                </div>
-                <EntriesTable entries={filteredEntries.slice(0, 50)} users={users} projects={projects} onDelete={handleDeleteEntry} currentUser={currentUser} />
-              </div>
-            </>
+            <LogPage
+              users={users}
+              projects={projects}
+              entries={entries}
+              currentUser={currentUser}
+              onSave={handleLogEntry}
+              onDelete={handleDeleteEntry}
+              onExport={(entriesToExport) => exportCSV(entriesToExport, users, projects)}
+            />
           )}
           {page === "dashboard" && (
             <>

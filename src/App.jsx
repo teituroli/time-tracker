@@ -82,6 +82,23 @@ const DB = {
     }
     await sbFetch(`projects?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ archived: true }) });
   },
+  async unarchiveProject(id) {
+    if (!USE_SUPABASE) {
+      const ps = LS.get("tt_projects").map(p => p.id === id ? { ...p, archived: false } : p);
+      LS.set("tt_projects", ps); return;
+    }
+    await sbFetch(`projects?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ archived: false }) });
+  },
+  async updateCollaborators(projectId, collaboratorIds) {
+    if (!USE_SUPABASE) {
+      const ps = LS.get("tt_projects").map(p => p.id === projectId ? { ...p, collaborator_ids: collaboratorIds } : p);
+      LS.set("tt_projects", ps); return;
+    }
+    await sbFetch(`project_members?project_id=eq.${projectId}`, { method: "DELETE", prefer: "return=minimal" });
+    if (collaboratorIds.length) {
+      await sbFetch("project_members", { method: "POST", body: JSON.stringify(collaboratorIds.map(uid => ({ project_id: projectId, user_id: uid }))) });
+    }
+  },
 
   // Time Entries — soft delete only, filter out deleted
   async getEntries() {
@@ -495,7 +512,8 @@ function LogPage({ users, projects, entries, currentUser, onSave, onDelete, onEx
   const [saving, setSaving] = useState(false);
   const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setErrors(e => ({ ...e, [k]: null })); };
 
-  const activeProjects = projects.filter(p => !p.archived && !p.deleted_at);
+  const getCollabIds = (p) => p.collaborator_ids ?? p.project_members?.map(m => m.user_id) ?? [];
+  const activeProjects = projects.filter(p => !p.archived && !p.deleted_at && getCollabIds(p).includes(currentUser.id));
 
   const validate = () => {
     const e = {};
@@ -526,7 +544,7 @@ function LogPage({ users, projects, entries, currentUser, onSave, onDelete, onEx
     <div>
       <div className="page-title">Log Time</div>
       {activeProjects.length === 0
-        ? <div className="empty">No active projects. Create one in the Projects tab first.</div>
+        ? <div className="empty">You're not added as a collaborator on any active projects yet. Ask someone to add you, or go to Projects to create one.</div>
         : (
           <div className="grid-3">
             {activeProjects.map(p => {
@@ -755,10 +773,38 @@ function WeeklyDashboard({ entries, users, projects }) {
 }
 
 // ─── PROJECTS PAGE ────────────────────────────────────────────────────────────
-function ProjectsPage({ users, projects, onCreateProject, onArchiveProject }) {
-  const [showModal, setShowModal] = useState(false);
+function CollaboratorModal({ title, users, initial, onSave, onClose }) {
+  const [selected, setSelected] = useState(initial);
+  const toggle = (id) => setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal">
+        <div className="modal-title">{title}</div>
+        <div className="field" style={{ marginBottom: 20 }}>
+          <label>Collaborators</label>
+          <div className="check-list">
+            {users.map(u => (
+              <label key={u.id} className="check-item">
+                <input type="checkbox" checked={selected.includes(u.id)} onChange={() => toggle(u.id)} />
+                {u.name}
+              </label>
+            ))}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" onClick={() => onSave(selected)}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProjectsPage({ users, projects, onCreateProject, onArchiveProject, onUnarchiveProject, onUpdateCollaborators }) {
+  const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ name: "", color: PROJECT_COLORS[0], collaborators: [] });
   const [showArchived, setShowArchived] = useState(false);
+  const [editingCollab, setEditingCollab] = useState(null); // project being edited
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const toggleCollab = (id) => setForm(f => ({
     ...f, collaborators: f.collaborators.includes(id)
@@ -769,9 +815,14 @@ function ProjectsPage({ users, projects, onCreateProject, onArchiveProject }) {
     if (!form.name.trim()) return;
     await onCreateProject(form.name.trim(), form.color, form.collaborators);
     setForm({ name: "", color: PROJECT_COLORS[0], collaborators: [] });
-    setShowModal(false);
+    setShowCreate(false);
   };
-  const visible = projects.filter(p => !p.deleted_at && (showArchived ? true : !p.archived));
+  const handleUpdateCollaborators = async (collaboratorIds) => {
+    await onUpdateCollaborators(editingCollab.id, collaboratorIds);
+    setEditingCollab(null);
+  };
+  const visible = projects.filter(p => !p.deleted_at && (showArchived ? p.archived : !p.archived));
+  const getCollabIds = (p) => p.collaborator_ids ?? p.project_members?.map(m => m.user_id) ?? [];
 
   return (
     <div>
@@ -780,7 +831,7 @@ function ProjectsPage({ users, projects, onCreateProject, onArchiveProject }) {
           <button className={`tab ${!showArchived ? "active" : ""}`} onClick={() => setShowArchived(false)}>Active</button>
           <button className={`tab ${showArchived ? "active" : ""}`} onClick={() => setShowArchived(true)}>Archived</button>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ New Project</button>
+        <button className="btn btn-primary" onClick={() => setShowCreate(true)}>+ New Project</button>
       </div>
 
       {visible.length === 0
@@ -788,27 +839,39 @@ function ProjectsPage({ users, projects, onCreateProject, onArchiveProject }) {
         : (
           <div className="grid-3">
             {visible.map(p => {
-              const collabIds = p.collaborator_ids ?? p.project_members?.map(m => m.user_id) ?? [];
+              const collabIds = getCollabIds(p);
               return (
-                <div key={p.id} className="project-card">
+                <div key={p.id} className="project-card static">
                   <div className="project-header">
                     <div className="color-swatch" style={{ background: p.color }} />
                     <div className="project-name">{p.name}</div>
                   </div>
-                  {collabIds.length > 0 && (
-                    <div>
-                      <div className="project-meta" style={{ marginBottom: 4 }}>Team</div>
-                      <div className="collab-chips">
-                        {collabIds.map(uid => {
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                      <div className="project-meta">Team</div>
+                      {!p.archived && (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          style={{ fontSize: 11, padding: "2px 8px" }}
+                          onClick={() => setEditingCollab(p)}
+                        >Edit</button>
+                      )}
+                    </div>
+                    <div className="collab-chips">
+                      {collabIds.length === 0
+                        ? <span style={{ fontSize: 11, color: "var(--text-muted)" }}>No collaborators yet</span>
+                        : collabIds.map(uid => {
                           const u = users.find(x => x.id === uid);
                           return u ? <span key={uid} className="collab-chip">{u.name}</span> : null;
-                        })}
-                      </div>
+                        })
+                      }
                     </div>
-                  )}
-                  {!p.archived && (
-                    <button className="btn btn-danger" style={{ alignSelf: "flex-start" }} onClick={() => onArchiveProject(p.id)}>Archive</button>
-                  )}
+                  </div>
+                  <button
+                    className={p.archived ? "btn btn-ghost btn-sm" : "btn btn-danger"}
+                    style={{ alignSelf: "flex-start", marginTop: 4, fontSize: 12 }}
+                    onClick={() => p.archived ? onUnarchiveProject(p.id) : onArchiveProject(p.id)}
+                  >{p.archived ? "Unarchive" : "Archive"}</button>
                 </div>
               );
             })}
@@ -816,8 +879,8 @@ function ProjectsPage({ users, projects, onCreateProject, onArchiveProject }) {
         )
       }
 
-      {showModal && (
-        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowModal(false)}>
+      {showCreate && (
+        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowCreate(false)}>
           <div className="modal">
             <div className="modal-title">New Project</div>
             <div className="field" style={{ marginBottom: 16 }}>
@@ -844,11 +907,21 @@ function ProjectsPage({ users, projects, onCreateProject, onArchiveProject }) {
               </div>
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <button className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancel</button>
+              <button className="btn btn-ghost" onClick={() => setShowCreate(false)}>Cancel</button>
               <button className="btn btn-primary" onClick={handleCreate}>Create Project</button>
             </div>
           </div>
         </div>
+      )}
+
+      {editingCollab && (
+        <CollaboratorModal
+          title={`Team — ${editingCollab.name}`}
+          users={users}
+          initial={getCollabIds(editingCollab)}
+          onSave={handleUpdateCollaborators}
+          onClose={() => setEditingCollab(null)}
+        />
       )}
     </div>
   );
@@ -893,10 +966,20 @@ export default function App() {
     setProjects(ps => ps.map(p => p.id === id ? { ...p, archived: true } : p));
     showToast("Project archived.");
   };
+  const handleUnarchiveProject = async (id) => {
+    await DB.unarchiveProject(id);
+    setProjects(ps => ps.map(p => p.id === id ? { ...p, archived: false } : p));
+    showToast("Project restored.");
+  };
   const handleLogEntry = async (entry) => {
     const e = await DB.logEntry(entry);
     setEntries(es => [e, ...es]);
     showToast("Time logged ✓");
+  };
+  const handleUpdateCollaborators = async (projectId, collaboratorIds) => {
+    await DB.updateCollaborators(projectId, collaboratorIds);
+    setProjects(ps => ps.map(p => p.id === projectId ? { ...p, collaborator_ids: collaboratorIds, project_members: collaboratorIds.map(uid => ({ user_id: uid })) } : p));
+    showToast("Team updated.");
   };
   const handleDeleteEntry = async (id) => {
     await DB.softDeleteEntry(id);
@@ -956,7 +1039,7 @@ export default function App() {
           {page === "projects" && (
             <>
               <div className="page-title">Projects</div>
-              <ProjectsPage users={users} projects={projects} onCreateProject={handleCreateProject} onArchiveProject={handleArchiveProject} />
+              <ProjectsPage users={users} projects={projects} onCreateProject={handleCreateProject} onArchiveProject={handleArchiveProject} onUnarchiveProject={handleUnarchiveProject} onUpdateCollaborators={handleUpdateCollaborators} />
             </>
           )}
         </main>

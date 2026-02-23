@@ -67,7 +67,7 @@ create policy "public read/write project_members" on project_members for all usi
 create policy "public read/write time_entries" on time_entries for all using (true) with check (true);
 create policy "public read/write settings" on settings for all using (true) with check (true);
 ```
-
+ 
 Then grab your **Project URL** and **anon key** from Settings → API.
 
 ### 2. Environment variables

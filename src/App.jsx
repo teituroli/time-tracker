@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import * as XLSX from "xlsx";
 
 // ─── SUPABASE CONFIG ──────────────────────────────────────────────────────────
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
@@ -94,6 +95,14 @@ const DB = {
     const res = await sbFetch("time_entries", { method: "POST", body: JSON.stringify(entry) });
     return res[0];
   },
+  async updateEntry(id, updates) {
+    const res = await sbFetch(`time_entries?id=eq.${id}`, {
+      method: "PATCH",
+      prefer: "return=representation",
+      body: JSON.stringify(updates),
+    });
+    return res[0];
+  },
   async softDeleteEntry(id) {
     await sbFetch(`time_entries?id=eq.${id}`, {
       method: "PATCH",
@@ -127,19 +136,18 @@ const PROJECT_COLORS = [
 ];
 const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 
-function exportCSV(entries, users, projects) {
+function exportExcel(entries, users, projects) {
   const rows = [["Date","User","Project","Hours","Notes"]];
   entries.forEach(e => {
     const user = users.find(u => u.id === e.user_id)?.name ?? e.user_id;
     const project = projects.find(p => p.id === e.project_id)?.name ?? e.project_id;
     rows.push([e.date, user, project, e.hours, e.notes ?? ""]);
   });
-  const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
-  const blob = new Blob([csv], { type: "text/csv" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `time-export-${new Date().toISOString().slice(0,10)}.csv`;
-  a.click();
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws["!cols"] = [{ wch: 12 }, { wch: 15 }, { wch: 20 }, { wch: 10 }, { wch: 30 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Time Entries");
+  XLSX.writeFile(wb, `time-export-${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
@@ -439,7 +447,7 @@ function AuthScreen({ onAuth }) {
 }
 
 // ─── LOG PAGE (project-first) ─────────────────────────────────────────────────
-function LogPage({ users, projects, entries, currentUser, onSave, onDelete, onExport }) {
+function LogPage({ users, projects, entries, currentUser, onSave, onDelete, onUpdate, onExport }) {
   const [selectedProject, setSelectedProject] = useState(null);
   const today = new Date().toISOString().slice(0, 10);
   const [form, setForm] = useState({ date: today, hours: "", notes: "" });
@@ -542,6 +550,15 @@ function LogPage({ users, projects, entries, currentUser, onSave, onDelete, onEx
         </div>
       </div>
 
+      {projectEntries.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div className="stat-card">
+            <div className="stat-value">{fmtHours(visibleEntries.reduce((sum, e) => sum + e.hours, 0))}</div>
+            <div className="stat-label">{entryFilter === "all" ? "Total logged" : "Total logged by " + users.find(u => u.id === entryFilter)?.name}</div>
+          </div>
+        </div>
+      )}
+
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <div className="card-title" style={{ marginBottom: 0 }}>Entries</div>
@@ -553,25 +570,44 @@ function LogPage({ users, projects, entries, currentUser, onSave, onDelete, onEx
               <option value="all">All team</option>
               {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
             </select>
-            <button className="btn btn-ghost btn-sm" onClick={() => onExport(visibleEntries)}>↓ CSV</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => onExport(visibleEntries)}>↓ XLSX</button>
           </div>
         </div>
-        <EntriesTable entries={visibleEntries.slice(0, 50)} users={users} projects={projects} onDelete={onDelete} currentUser={currentUser} hideProject />
+        <EntriesTable entries={visibleEntries.slice(0, 50)} users={users} projects={projects} onDelete={onDelete} onUpdate={onUpdate} currentUser={currentUser} hideProject />
       </div>
     </div>
   );
 }
 
 // ─── ENTRIES TABLE ────────────────────────────────────────────────────────────
-function EntriesTable({ entries, users, projects, onDelete, currentUser, hideProject }) {
+function EntriesTable({ entries, users, projects, onDelete, onUpdate, currentUser, hideProject }) {
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({ hours: "", notes: "" });
   const getName = (id, arr) => arr.find(x => x.id === id)?.name ?? "—";
   const getColor = (id) => projects.find(p => p.id === id)?.color ?? "#888";
+
+  const startEdit = (entry) => {
+    setEditingId(entry.id);
+    setEditForm({ hours: entry.hours, notes: entry.notes ?? "" });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditForm({ hours: "", notes: "" });
+  };
+
+  const saveEdit = async (entryId) => {
+    if (!editForm.hours || parseFloat(editForm.hours) <= 0) return;
+    await onUpdate(entryId, { hours: parseFloat(editForm.hours), notes: editForm.notes });
+    setEditingId(null);
+    setEditForm({ hours: "", notes: "" });
+  };
 
   if (!entries.length) return <div className="empty">No entries yet.</div>;
 
   const cols = hideProject
-    ? "100px 1fr 70px 1fr 36px"
-    : "100px 1fr 1fr 70px 1fr 36px";
+    ? "100px 1fr 70px 1fr 60px"
+    : "100px 1fr 1fr 70px 1fr 60px";
 
   return (
     <div className="entry-list">
@@ -582,6 +618,7 @@ function EntriesTable({ entries, users, projects, onDelete, currentUser, hidePro
       </div>
       {entries.map(e => {
         const isOwn = e.user_id === currentUser.id;
+        const isEditing = editingId === e.id;
         return (
           <div key={e.id} className="entry-row" style={{ gridTemplateColumns: cols }}>
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>{e.date}</span>
@@ -592,12 +629,52 @@ function EntriesTable({ entries, users, projects, onDelete, currentUser, hidePro
                 {getName(e.project_id, projects)}
               </span>
             )}
-            <span className="hours-badge">{fmtHours(e.hours)}</span>
-            <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{e.notes || "—"}</span>
-            {isOwn
-              ? <button className="btn btn-danger" title="Remove entry" onClick={() => onDelete(e.id)}>✕</button>
-              : <span style={{ width: 36 }} />
-            }
+            {isEditing ? (
+              <>
+                <input
+                  type="number"
+                  step="0.25"
+                  min="0.25"
+                  max="24"
+                  value={editForm.hours}
+                  onChange={e => setEditForm(f => ({ ...f, hours: e.target.value }))}
+                  onKeyDown={ev => {
+                    if (ev.key === "Enter") saveEdit(e.id);
+                    if (ev.key === "Escape") cancelEdit();
+                  }}
+                  style={{ background: "var(--surface2)", border: "1px solid var(--amber)", color: "var(--text)", borderRadius: "var(--radius)", padding: "4px 8px", fontFamily: "var(--font-display)", fontSize: 12, outline: "none", width: "100%" }}
+                  autoFocus
+                />
+                <input
+                  type="text"
+                  value={editForm.notes}
+                  onChange={ev => setEditForm(f => ({ ...f, notes: ev.target.value }))}
+                  onKeyDown={ev => {
+                    if (ev.key === "Enter") saveEdit(e.id);
+                    if (ev.key === "Escape") cancelEdit();
+                  }}
+                  placeholder="Notes"
+                  style={{ background: "var(--surface2)", border: "1px solid var(--amber)", color: "var(--text)", borderRadius: "var(--radius)", padding: "4px 8px", fontFamily: "var(--font-display)", fontSize: 12, outline: "none", width: "100%" }}
+                />
+                <div style={{ display: "flex", gap: 4 }}>
+                  <button className="btn btn-primary btn-sm" style={{ padding: "2px 6px", fontSize: 11 }} onClick={() => saveEdit(e.id)}>✓</button>
+                  <button className="btn btn-ghost btn-sm" style={{ padding: "2px 6px", fontSize: 11 }} onClick={cancelEdit}>✕</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <span className="hours-badge">{fmtHours(e.hours)}</span>
+                <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{e.notes || "—"}</span>
+                {isOwn ? (
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <button className="btn btn-ghost btn-sm" style={{ padding: "2px 6px", fontSize: 11 }} onClick={() => startEdit(e)} title="Edit entry">✎</button>
+                    <button className="btn btn-danger" style={{ padding: "2px 6px", fontSize: 11 }} title="Remove entry" onClick={() => onDelete(e.id)}>✕</button>
+                  </div>
+                ) : (
+                  <span style={{ width: 60 }} />
+                )}
+              </>
+            )}
           </div>
         );
       })}
@@ -978,6 +1055,11 @@ export default function App() {
     setEntries(es => es.filter(e => e.id !== id));
     showToast("Entry removed.");
   };
+  const handleUpdateEntry = async (id, updates) => {
+    const updatedEntry = await DB.updateEntry(id, updates);
+    setEntries(es => es.map(e => e.id === id ? updatedEntry : e));
+    showToast("Entry updated.");
+  };
 
   if (!authed) return <><style>{styles}</style><AuthScreen onAuth={() => setAuthed(true)} /></>;
 
@@ -1025,7 +1107,8 @@ export default function App() {
               currentUser={currentUser}
               onSave={handleLogEntry}
               onDelete={handleDeleteEntry}
-              onExport={(entriesToExport) => exportCSV(entriesToExport, users, projects)}
+              onUpdate={handleUpdateEntry}
+              onExport={(entriesToExport) => exportExcel(entriesToExport, users, projects)}
             />
           )}
           {page === "dashboard" && (
